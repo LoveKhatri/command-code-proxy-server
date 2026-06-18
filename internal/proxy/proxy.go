@@ -64,15 +64,22 @@ type Proxy struct {
 	BaseURL string
 	Client  *http.Client
 	Debug   bool
+	Models  *ModelCache
 }
 
 // NewProxy creates a new proxy instance
 func NewProxy(apiKey string) *Proxy {
-	return &Proxy{
+	p := &Proxy{
 		APIKey:  apiKey,
 		BaseURL: defaultBaseURL,
 		Client:  &http.Client{Timeout: defaultTimeout},
+		Models:  NewModelCache(),
 	}
+	// Kick off background refresh — don't block startup
+	if apiKey != "" {
+		p.Models.StartBackgroundRefresh(apiKey)
+	}
+	return p
 }
 
 // BuildRequest builds the CommandCode request body
@@ -675,56 +682,81 @@ func responseItemsToMessages(items []any) []api.OpenAIMessage {
 
 // HandleModels handles the /v1/models endpoint
 func (p *Proxy) HandleModels(w http.ResponseWriter, r *http.Request) {
+	// Use the dynamic cache; fall back to static list if cache is empty/unavailable.
+	cached := p.Models.Get()
+
+	// If cache returned the static fallback (empty cache triggers fallback in Get),
+	// still try to refresh in the background so the next request gets fresh data.
+	if p.Models.IsStale() && !p.Models.fetchingNow {
+		go func() {
+			if err := p.Models.Refresh(p.APIKey); err != nil {
+				log.Printf("[models] background refresh failed: %v", err)
+			}
+		}()
+	}
+
 	models := api.OpenAIModelList{
 		Object: "list",
-		Data: []api.OpenAIModel{
-			// MoonshotAI
-			{ID: "moonshotai/Kimi-K2.7-Code", Object: "model", Created: 0, OwnedBy: "moonshotai", ContextLength: 262144},
-			{ID: "moonshotai/Kimi-K2.7-Code-Highspeed", Object: "model", Created: 0, OwnedBy: "moonshotai", ContextLength: 262144},
-			{ID: "moonshotai/Kimi-K2.6", Object: "model", Created: 0, OwnedBy: "moonshotai", ContextLength: 262144},
-			{ID: "moonshotai/Kimi-K2.5", Object: "model", Created: 0, OwnedBy: "moonshotai", ContextLength: 262144},
-			// ZhipuAI
-			{ID: "zai-org/GLM-5.2", Object: "model", Created: 0, OwnedBy: "zhipuai", ContextLength: 1048576},
-			{ID: "zai-org/GLM-5.1", Object: "model", Created: 0, OwnedBy: "zhipuai", ContextLength: 202752},
-			{ID: "zai-org/GLM-5", Object: "model", Created: 0, OwnedBy: "zhipuai", ContextLength: 202752},
-			// MiniMaxAI
-			{ID: "MiniMaxAI/MiniMax-M3", Object: "model", Created: 0, OwnedBy: "minimaxai", ContextLength: 1000000},
-			{ID: "MiniMaxAI/MiniMax-M3-Promo", Object: "model", Created: 0, OwnedBy: "minimaxai", ContextLength: 1000000},
-			{ID: "MiniMaxAI/MiniMax-M2.7", Object: "model", Created: 0, OwnedBy: "minimaxai", ContextLength: 204800},
-			{ID: "MiniMaxAI/MiniMax-M2.5", Object: "model", Created: 0, OwnedBy: "minimaxai", ContextLength: 204800},
-			// DeepSeek
-			{ID: "deepseek/deepseek-v4-pro", Object: "model", Created: 0, OwnedBy: "deepseek", ContextLength: 1000000},
-			{ID: "deepseek/deepseek-v4-flash", Object: "model", Created: 0, OwnedBy: "deepseek", ContextLength: 1000000},
-			// Qwen
-			{ID: "Qwen/Qwen3.6-Max-Preview", Object: "model", Created: 0, OwnedBy: "qwen", ContextLength: 1048576},
-			{ID: "Qwen/Qwen3.6-Plus", Object: "model", Created: 0, OwnedBy: "qwen", ContextLength: 1048576},
-			{ID: "Qwen/Qwen3.7-Max", Object: "model", Created: 0, OwnedBy: "qwen", ContextLength: 1048576},
-			{ID: "Qwen/Qwen3.7-Plus", Object: "model", Created: 0, OwnedBy: "qwen", ContextLength: 1048576},
-			// StepFun
-			{ID: "stepfun/Step-3.7-Flash", Object: "model", Created: 0, OwnedBy: "stepfun", ContextLength: 262144},
-			{ID: "stepfun/Step-3.5-Flash", Object: "model", Created: 0, OwnedBy: "stepfun", ContextLength: 262144},
-			// Xiaomi
-			{ID: "xiaomi/mimo-v2.5-pro", Object: "model", Created: 0, OwnedBy: "xiaomi", ContextLength: 1048576},
-			{ID: "xiaomi/mimo-v2.5", Object: "model", Created: 0, OwnedBy: "xiaomi", ContextLength: 1048576},
-			// NVIDIA
-			{ID: "nvidia/nemotron-3-ultra-550b-a55b", Object: "model", Created: 0, OwnedBy: "nvidia", ContextLength: 131072},
-			// Anthropic
-			{ID: "claude-sonnet-4-6", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 1000000},
-			{ID: "claude-fable-5", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 1000000},
-			{ID: "claude-opus-4-8", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 1000000},
-			{ID: "claude-opus-4-7", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 1000000},
-			{ID: "claude-opus-4-6", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 200000},
-			{ID: "claude-haiku-4-5", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 200000},
-			// OpenAI
-			{ID: "gpt-5.5", Object: "model", Created: 0, OwnedBy: "openai", ContextLength: 1050000},
-			{ID: "gpt-5.4", Object: "model", Created: 0, OwnedBy: "openai", ContextLength: 1050000},
-			{ID: "gpt-5.3-codex", Object: "model", Created: 0, OwnedBy: "openai", ContextLength: 400000},
-			{ID: "gpt-5.4-mini", Object: "model", Created: 0, OwnedBy: "openai", ContextLength: 400000},
-			// Google
-			{ID: "google/gemini-3.5-flash", Object: "model", Created: 0, OwnedBy: "google", ContextLength: 1048576},
-			{ID: "google/gemini-3.1-flash-lite", Object: "model", Created: 0, OwnedBy: "google", ContextLength: 1048576},
-		},
+		Data:   cached,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(models)
+}
+
+// getStaticModels returns the hardcoded fallback list of models. Used when
+// the dynamic cache is empty and we haven't been able to fetch from upstream.
+// Context lengths are looked up from contextmap.go so we have one source of truth.
+func getStaticModels() []api.OpenAIModel {
+	ids := []string{
+		// MoonshotAI
+		"moonshotai/Kimi-K2.7-Code", "moonshotai/Kimi-K2.7-Code-Highspeed",
+		"moonshotai/Kimi-K2.6", "moonshotai/Kimi-K2.5",
+		// ZhipuAI
+		"zai-org/GLM-5.2", "zai-org/GLM-5.1", "zai-org/GLM-5",
+		// MiniMaxAI
+		"MiniMaxAI/MiniMax-M3", "MiniMaxAI/MiniMax-M3-Promo",
+		"MiniMaxAI/MiniMax-M2.7", "MiniMaxAI/MiniMax-M2.5",
+		// DeepSeek
+		"deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash",
+		// Qwen
+		"Qwen/Qwen3.6-Max-Preview", "Qwen/Qwen3.6-Plus",
+		"Qwen/Qwen3.7-Max", "Qwen/Qwen3.7-Plus",
+		// StepFun
+		"stepfun/Step-3.7-Flash", "stepfun/Step-3.5-Flash",
+		// Xiaomi
+		"xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5",
+		// NVIDIA
+		"nvidia/nemotron-3-ultra-550b-a55b",
+		// Anthropic
+		"claude-sonnet-4-6", "claude-fable-5",
+		"claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+		"claude-haiku-4-5", "claude-haiku-4-5-20251001",
+		// OpenAI
+		"gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.4-mini",
+		// Google
+		"google/gemini-3.5-flash", "google/gemini-3.1-flash-lite",
+		// Command Code internal (free with all plans)
+		tasteOneModelID,
+	}
+	out := make([]api.OpenAIModel, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, api.OpenAIModel{
+			ID:            id,
+			Object:        "model",
+			Created:       0,
+			OwnedBy:       inferOwner(id),
+			ContextLength: ContextLengthFor(id),
+		})
+	}
+	return out
+}
+
+// inferOwner extracts the provider name from a model ID like "anthropic/claude-...".
+func inferOwner(id string) string {
+	for i, c := range id {
+		if c == '/' {
+			return id[:i]
+		}
+	}
+	return "unknown"
 }
