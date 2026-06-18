@@ -146,6 +146,12 @@ type OpenAIModel struct {
 	OwnedBy       string `json:"owned_by"`
 	ContextLength int    `json:"context_length,omitempty"`
 	Pricing       *ModelPricing `json:"pricing,omitempty"`
+	// Descriptive metadata from Command Code's docs.
+	// Populated dynamically — display_name is "Claude Sonnet 4.6" etc,
+	// description is the one-line "best for" summary.
+	DisplayName  string `json:"display_name,omitempty"`
+	Description  string `json:"description,omitempty"`
+	Capabilities string `json:"capabilities,omitempty"`
 }
 
 // ModelPricing describes deal/pricing information for a model.

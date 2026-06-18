@@ -60,26 +60,30 @@ func normalizeFinishReason(reason string) string {
 
 // Proxy struct
 type Proxy struct {
-	APIKey  string
-	BaseURL string
-	Client  *http.Client
-	Debug   bool
-	Models  *ModelCache
-	Pricing *PricingCache
+	APIKey     string
+	BaseURL    string
+	Client     *http.Client
+	Debug      bool
+	Models     *ModelCache
+	Pricing    *PricingCache
+	ModelInfo  *ModelInfoCache
 }
 
 // NewProxy creates a new proxy instance
 func NewProxy(apiKey string) *Proxy {
 	pricing := NewPricingCache()
+	modelInfo := NewModelInfoCache()
 	p := &Proxy{
-		APIKey:  apiKey,
-		BaseURL: defaultBaseURL,
-		Client:  &http.Client{Timeout: defaultTimeout},
-		Models:  NewModelCache(pricing),
-		Pricing: pricing,
+		APIKey:    apiKey,
+		BaseURL:   defaultBaseURL,
+		Client:    &http.Client{Timeout: defaultTimeout},
+		Models:    NewModelCache(pricing, modelInfo),
+		Pricing:   pricing,
+		ModelInfo: modelInfo,
 	}
 	// Kick off background refreshes — don't block startup
 	pricing.StartBackgroundRefresh()
+	modelInfo.StartBackgroundRefresh()
 	if apiKey != "" {
 		p.Models.StartBackgroundRefresh(apiKey)
 	}
@@ -714,11 +718,10 @@ func getStaticModels() []api.OpenAIModel {
 	ids := []string{
 		// MoonshotAI
 		"moonshotai/Kimi-K2.7-Code", "moonshotai/Kimi-K2.7-Code-Highspeed",
-		"moonshotai/Kimi-K2.6", "moonshotai/Kimi-K2.5",
 		// ZhipuAI
 		"zai-org/GLM-5.2", "zai-org/GLM-5.1", "zai-org/GLM-5",
 		// MiniMaxAI
-		"MiniMaxAI/MiniMax-M3", "MiniMaxAI/MiniMax-M3-Promo",
+		"MiniMaxAI/MiniMax-M3",
 		"MiniMaxAI/MiniMax-M2.7", "MiniMaxAI/MiniMax-M2.5",
 		// DeepSeek
 		"deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash",
@@ -742,13 +745,14 @@ func getStaticModels() []api.OpenAIModel {
 	}
 	out := make([]api.OpenAIModel, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, api.OpenAIModel{
+		m := api.OpenAIModel{
 			ID:            id,
 			Object:        "model",
 			Created:       0,
 			OwnedBy:       inferOwner(id),
 			ContextLength: ContextLengthFor(id),
-		})
+		}
+		out = append(out, m)
 	}
 	return out
 }

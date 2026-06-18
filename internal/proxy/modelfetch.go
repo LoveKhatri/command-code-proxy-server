@@ -59,13 +59,15 @@ type ModelCache struct {
 	httpClient  *http.Client
 	fetchingNow bool // prevents concurrent refreshes
 	pricing     *PricingCache
+	modelInfo   *ModelInfoCache
 }
 
 // NewModelCache creates an empty cache. Call Refresh() to populate it.
-func NewModelCache(pricing *PricingCache) *ModelCache {
+func NewModelCache(pricing *PricingCache, info *ModelInfoCache) *ModelCache {
 	return &ModelCache{
-		models:  nil,
-		pricing: pricing,
+		models:    nil,
+		pricing:   pricing,
+		modelInfo: info,
 		httpClient: &http.Client{
 			Timeout: modelFetchTimeout,
 		},
@@ -78,9 +80,16 @@ func (c *ModelCache) Get() []api.OpenAIModel {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if len(c.models) == 0 {
-		return getStaticModels()
+		// Return static fallback enriched with model info (if available)
+		static := getStaticModels()
+		if c.modelInfo != nil {
+			for i := range static {
+				c.modelInfo.AttachInfo(&static[i])
+			}
+		}
+		return static
 	}
-	// Return a copy to prevent callers from mutating the cache
+	// Return a copy so callers can't mutate cache state
 	out := make([]api.OpenAIModel, len(c.models))
 	copy(out, c.models)
 	return out
@@ -181,6 +190,10 @@ func (c *ModelCache) fetchAndValidate(apiKey string) ([]api.OpenAIModel, error) 
 					Status:      deal.Status,
 				}
 			}
+		}
+		// Attach display name + description if available
+		if c.modelInfo != nil {
+			c.modelInfo.AttachInfo(&m)
 		}
 		enriched = append(enriched, m)
 	}
