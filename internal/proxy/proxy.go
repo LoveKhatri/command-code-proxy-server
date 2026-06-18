@@ -95,6 +95,12 @@ func (p *Proxy) BuildRequest(openAIReq api.OpenAIChatRequest) (api.CCRequestBody
 
 	tools := ConvertTools(openAIReq.Tools)
 
+	// Map reasoning effort
+	var reasoning string
+	if openAIReq.Reasoning != nil {
+		reasoning = string(*openAIReq.Reasoning)
+	}
+
 	ccBody := api.CCRequestBody{
 		Config: api.CCConfig{
 			WorkingDir:    ".",
@@ -118,6 +124,7 @@ func (p *Proxy) BuildRequest(openAIReq api.OpenAIChatRequest) (api.CCRequestBody
 			MaxTokens:   maxTokens,
 			Temperature: temperature,
 			Stream:      true,
+			Reasoning:   reasoning,
 		},
 		ThreadID: uuid.New().String(),
 	}
@@ -672,24 +679,50 @@ func (p *Proxy) HandleModels(w http.ResponseWriter, r *http.Request) {
 		Object: "list",
 		Data: []api.OpenAIModel{
 			// MoonshotAI
-			{ID: "moonshotai/Kimi-K2.6", Object: "model", Created: 0, OwnedBy: "moonshotai"},
-			{ID: "moonshotai/Kimi-K2.5", Object: "model", Created: 0, OwnedBy: "moonshotai"},
+			{ID: "moonshotai/Kimi-K2.7-Code", Object: "model", Created: 0, OwnedBy: "moonshotai", ContextLength: 262144},
+			{ID: "moonshotai/Kimi-K2.7-Code-Highspeed", Object: "model", Created: 0, OwnedBy: "moonshotai", ContextLength: 262144},
+			{ID: "moonshotai/Kimi-K2.6", Object: "model", Created: 0, OwnedBy: "moonshotai", ContextLength: 262144},
+			{ID: "moonshotai/Kimi-K2.5", Object: "model", Created: 0, OwnedBy: "moonshotai", ContextLength: 262144},
 			// ZhipuAI
-			{ID: "zai-org/GLM-5.1", Object: "model", Created: 0, OwnedBy: "zhipuai"},
-			{ID: "zai-org/GLM-5", Object: "model", Created: 0, OwnedBy: "zhipuai"},
+			{ID: "zai-org/GLM-5.2", Object: "model", Created: 0, OwnedBy: "zhipuai", ContextLength: 1048576},
+			{ID: "zai-org/GLM-5.1", Object: "model", Created: 0, OwnedBy: "zhipuai", ContextLength: 202752},
+			{ID: "zai-org/GLM-5", Object: "model", Created: 0, OwnedBy: "zhipuai", ContextLength: 202752},
 			// MiniMaxAI
-			{ID: "MiniMaxAI/MiniMax-M2.7", Object: "model", Created: 0, OwnedBy: "minimaxai"},
-			{ID: "MiniMaxAI/MiniMax-M2.5", Object: "model", Created: 0, OwnedBy: "minimaxai"},
+			{ID: "MiniMaxAI/MiniMax-M3", Object: "model", Created: 0, OwnedBy: "minimaxai", ContextLength: 1000000},
+			{ID: "MiniMaxAI/MiniMax-M3-Promo", Object: "model", Created: 0, OwnedBy: "minimaxai", ContextLength: 1000000},
+			{ID: "MiniMaxAI/MiniMax-M2.7", Object: "model", Created: 0, OwnedBy: "minimaxai", ContextLength: 204800},
+			{ID: "MiniMaxAI/MiniMax-M2.5", Object: "model", Created: 0, OwnedBy: "minimaxai", ContextLength: 204800},
 			// DeepSeek
-			{ID: "deepseek/deepseek-v4-pro", Object: "model", Created: 0, OwnedBy: "deepseek"},
-			{ID: "deepseek/deepseek-v4-flash", Object: "model", Created: 0, OwnedBy: "deepseek"},
+			{ID: "deepseek/deepseek-v4-pro", Object: "model", Created: 0, OwnedBy: "deepseek", ContextLength: 1000000},
+			{ID: "deepseek/deepseek-v4-flash", Object: "model", Created: 0, OwnedBy: "deepseek", ContextLength: 1000000},
 			// Qwen
-			{ID: "Qwen/Qwen3.6-Max-Preview", Object: "model", Created: 0, OwnedBy: "qwen"},
-			{ID: "Qwen/Qwen3.6-Plus", Object: "model", Created: 0, OwnedBy: "qwen"},
+			{ID: "Qwen/Qwen3.6-Max-Preview", Object: "model", Created: 0, OwnedBy: "qwen", ContextLength: 1048576},
+			{ID: "Qwen/Qwen3.6-Plus", Object: "model", Created: 0, OwnedBy: "qwen", ContextLength: 1048576},
+			{ID: "Qwen/Qwen3.7-Max", Object: "model", Created: 0, OwnedBy: "qwen", ContextLength: 1048576},
+			{ID: "Qwen/Qwen3.7-Plus", Object: "model", Created: 0, OwnedBy: "qwen", ContextLength: 1048576},
 			// StepFun
-			{ID: "stepfun/Step-3.5-Flash", Object: "model", Created: 0, OwnedBy: "stepfun"},
+			{ID: "stepfun/Step-3.7-Flash", Object: "model", Created: 0, OwnedBy: "stepfun", ContextLength: 262144},
+			{ID: "stepfun/Step-3.5-Flash", Object: "model", Created: 0, OwnedBy: "stepfun", ContextLength: 262144},
+			// Xiaomi
+			{ID: "xiaomi/mimo-v2.5-pro", Object: "model", Created: 0, OwnedBy: "xiaomi", ContextLength: 1048576},
+			{ID: "xiaomi/mimo-v2.5", Object: "model", Created: 0, OwnedBy: "xiaomi", ContextLength: 1048576},
+			// NVIDIA
+			{ID: "nvidia/nemotron-3-ultra-550b-a55b", Object: "model", Created: 0, OwnedBy: "nvidia", ContextLength: 131072},
+			// Anthropic
+			{ID: "claude-sonnet-4-6", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 1000000},
+			{ID: "claude-fable-5", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 1000000},
+			{ID: "claude-opus-4-8", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 1000000},
+			{ID: "claude-opus-4-7", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 1000000},
+			{ID: "claude-opus-4-6", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 200000},
+			{ID: "claude-haiku-4-5", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: 200000},
+			// OpenAI
+			{ID: "gpt-5.5", Object: "model", Created: 0, OwnedBy: "openai", ContextLength: 1050000},
+			{ID: "gpt-5.4", Object: "model", Created: 0, OwnedBy: "openai", ContextLength: 1050000},
+			{ID: "gpt-5.3-codex", Object: "model", Created: 0, OwnedBy: "openai", ContextLength: 400000},
+			{ID: "gpt-5.4-mini", Object: "model", Created: 0, OwnedBy: "openai", ContextLength: 400000},
 			// Google
-			{ID: "google/gemini-3.1-flash-lite", Object: "model", Created: 0, OwnedBy: "google"},
+			{ID: "google/gemini-3.5-flash", Object: "model", Created: 0, OwnedBy: "google", ContextLength: 1048576},
+			{ID: "google/gemini-3.1-flash-lite", Object: "model", Created: 0, OwnedBy: "google", ContextLength: 1048576},
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
