@@ -65,17 +65,21 @@ type Proxy struct {
 	Client  *http.Client
 	Debug   bool
 	Models  *ModelCache
+	Pricing *PricingCache
 }
 
 // NewProxy creates a new proxy instance
 func NewProxy(apiKey string) *Proxy {
+	pricing := NewPricingCache()
 	p := &Proxy{
 		APIKey:  apiKey,
 		BaseURL: defaultBaseURL,
 		Client:  &http.Client{Timeout: defaultTimeout},
-		Models:  NewModelCache(),
+		Models:  NewModelCache(pricing),
+		Pricing: pricing,
 	}
-	// Kick off background refresh — don't block startup
+	// Kick off background refreshes — don't block startup
+	pricing.StartBackgroundRefresh()
 	if apiKey != "" {
 		p.Models.StartBackgroundRefresh(apiKey)
 	}
@@ -735,8 +739,6 @@ func getStaticModels() []api.OpenAIModel {
 		"gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.4-mini",
 		// Google
 		"google/gemini-3.5-flash", "google/gemini-3.1-flash-lite",
-		// Command Code internal (free with all plans)
-		tasteOneModelID,
 	}
 	out := make([]api.OpenAIModel, 0, len(ids))
 	for _, id := range ids {

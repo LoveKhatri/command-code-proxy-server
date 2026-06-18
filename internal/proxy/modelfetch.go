@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,17 +13,27 @@ import (
 	"time"
 
 	"github.com/dev2k6/command-code-proxy-server/internal/api"
+	"github.com/dev2k6/command-code-proxy-server/internal/version"
 )
 
 const (
 	// upstreamModelsURL is Command Code's Provider API models endpoint
 	upstreamModelsURL = "https://api.commandcode.ai/provider/v1/models"
 
+	// upstreamProbeURL is the chat endpoint we use to probe whether a model is
+	// actually reachable. We send a minimal request — if it returns non-403
+	// (e.g., 200 with content, or 400 for bad request), the model exists.
+	upstreamProbeURL = "https://api.commandcode.ai/alpha/generate"
+
 	// modelCacheTTL is how often we refresh the model list from upstream
 	modelCacheTTL = 6 * time.Hour
 
 	// modelFetchTimeout is the per-request timeout for upstream model fetching
 	modelFetchTimeout = 10 * time.Second
+
+	// modelProbeConcurrency caps how many models we probe in parallel.
+	// Upstream gets cranky if we hammer with 30 concurrent requests.
+	modelProbeConcurrency = 4
 )
 
 // UpstreamModel represents a single model in the upstream Command Code API
@@ -36,8 +47,8 @@ type UpstreamModel struct {
 
 // UpstreamModelList is the response wrapper for /v1/models
 type UpstreamModelList struct {
-	Object string           `json:"object"`
-	Data   []UpstreamModel  `json:"data"`
+	Object string          `json:"object"`
+	Data   []UpstreamModel `json:"data"`
 }
 
 // ModelCache holds the dynamically-fetched model list with thread-safe access.
@@ -47,25 +58,18 @@ type ModelCache struct {
 	fetchedAt   time.Time
 	httpClient  *http.Client
 	fetchingNow bool // prevents concurrent refreshes
+	pricing     *PricingCache
 }
 
 // NewModelCache creates an empty cache. Call Refresh() to populate it.
-func NewModelCache() *ModelCache {
+func NewModelCache(pricing *PricingCache) *ModelCache {
 	return &ModelCache{
-		models:     nil,
-		httpClient: &http.Client{Timeout: modelFetchTimeout},
+		models:  nil,
+		pricing: pricing,
+		httpClient: &http.Client{
+			Timeout: modelFetchTimeout,
+		},
 	}
-}
-
-// containsModel checks if a model ID is already in the list (used to avoid
-// double-adding injected models).
-func containsModel(list []api.OpenAIModel, id string) bool {
-	for _, m := range list {
-		if m.ID == id {
-			return true
-		}
-	}
-	return false
 }
 
 // Get returns a copy of the current cached models. If cache is empty,
@@ -90,6 +94,7 @@ func (c *ModelCache) IsStale() bool {
 }
 
 // Refresh fetches the upstream model list and rebuilds the cache.
+// Models that 403 upstream (model not recognized) are filtered out.
 // On error, logs but keeps the existing cache (or static fallback if empty).
 func (c *ModelCache) Refresh(apiKey string) error {
 	c.mu.Lock()
@@ -106,12 +111,29 @@ func (c *ModelCache) Refresh(apiKey string) error {
 		c.mu.Unlock()
 	}()
 
+	models, err := c.fetchAndValidate(apiKey)
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	c.models = models
+	c.fetchedAt = time.Now()
+	c.mu.Unlock()
+
+	log.Printf("[models] refreshed cache: %d models (validated against upstream)", len(models))
+	return nil
+}
+
+// fetchAndValidate fetches the upstream model list, then probes each model
+// to verify it's reachable. Models that 403 upstream are filtered out.
+func (c *ModelCache) fetchAndValidate(apiKey string) ([]api.OpenAIModel, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), modelFetchTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamModelsURL, nil)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "application/json")
@@ -119,68 +141,141 @@ func (c *ModelCache) Refresh(apiKey string) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("fetch upstream: %w", err)
+		return nil, fmt.Errorf("fetch upstream: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("upstream status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("upstream status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var upstream UpstreamModelList
 	if err := json.NewDecoder(resp.Body).Decode(&upstream); err != nil {
-		return fmt.Errorf("decode upstream: %w", err)
+		return nil, fmt.Errorf("decode upstream: %w", err)
 	}
 
-	// Convert upstream models to our OpenAI model format, enriching with
-	// context_length from our local override map.
-	enriched := make([]api.OpenAIModel, 0, len(upstream.Data)+1)
-	for _, m := range upstream.Data {
-		enriched = append(enriched, api.OpenAIModel{
-			ID:            m.ID,
-			Object:        m.Object,
-			Created:       m.Created,
-			OwnedBy:       m.OwnedBy,
-			ContextLength: ContextLengthFor(m.ID),
-		})
-	}
+	// Probe each model in parallel to filter out non-existent ones.
+	probeResults := c.probeModels(apiKey, upstream.Data)
 
-	// Inject Command Code's internal "taste-1" model — not exposed via upstream
-	// /v1/models API but available to all CLI users. Skip if already present.
-	if !containsModel(enriched, tasteOneModelID) {
-		enriched = append(enriched, api.OpenAIModel{
-			ID:            tasteOneModelID,
-			Object:        "model",
-			Created:       0,
-			OwnedBy:       "commandcode",
-			ContextLength: tasteOneContextLength,
-		})
-		log.Printf("[models] injected internal model: %s", tasteOneModelID)
-	}
-
-	// Inject Claude variants that may not appear in upstream response:
-	// - claude-haiku-4-5 (bare name, no date suffix)
-	// - claude-opus-4-6 (alternate Opus variant)
-	// Skip if already present in upstream response.
-	for _, m := range []api.OpenAIModel{
-		{ID: "claude-haiku-4-5", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: ContextLengthFor("claude-haiku-4-5")},
-		{ID: "claude-opus-4-6", Object: "model", Created: 0, OwnedBy: "anthropic", ContextLength: ContextLengthFor("claude-opus-4-6")},
-		{ID: "MiniMaxAI/MiniMax-M3-Promo", Object: "model", Created: 0, OwnedBy: "minimaxai", ContextLength: ContextLengthFor("MiniMaxAI/MiniMax-M3-Promo")},
-	} {
-		if !containsModel(enriched, m.ID) {
-			enriched = append(enriched, m)
-			log.Printf("[models] injected upstream-missing model: %s", m.ID)
+	// Build the validated model list.
+	enriched := make([]api.OpenAIModel, 0, len(probeResults))
+	for _, pr := range probeResults {
+		if !pr.reachable {
+			log.Printf("[models] filtered out unreachable model: %s (probe status: %d)", pr.model.ID, pr.status)
+			continue
 		}
+		m := api.OpenAIModel{
+			ID:            pr.model.ID,
+			Object:        pr.model.Object,
+			Created:       pr.model.Created,
+			OwnedBy:       pr.model.OwnedBy,
+			ContextLength: ContextLengthFor(pr.model.ID),
+		}
+		// Attach pricing/deal info if available
+		if c.pricing != nil {
+			if deal, ok := c.pricing.GetDeal(pr.model.ID); ok {
+				m.Pricing = &api.ModelPricing{
+					Multiplier:  deal.Multiplier,
+					Description: deal.Description,
+					Status:      deal.Status,
+				}
+			}
+		}
+		enriched = append(enriched, m)
 	}
+	return enriched, nil
+}
 
-	c.mu.Lock()
-	c.models = enriched
-	c.fetchedAt = time.Now()
-	c.mu.Unlock()
+// probeResult holds the result of probing a single model.
+type probeResult struct {
+	model     UpstreamModel
+	reachable bool
+	status    int
+}
 
-	log.Printf("[models] refreshed cache: %d models from upstream", len(enriched))
-	return nil
+// probeModels probes each model in parallel to verify upstream reachability.
+// Returns results in input order.
+func (c *ModelCache) probeModels(apiKey string, models []UpstreamModel) []probeResult {
+	results := make([]probeResult, len(models))
+	sem := make(chan struct{}, modelProbeConcurrency)
+	var wg sync.WaitGroup
+
+	for i, m := range models {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, model UpstreamModel) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			reachable, status := c.probeModel(apiKey, model.ID)
+			results[idx] = probeResult{model: model, reachable: reachable, status: status}
+		}(i, m)
+	}
+	wg.Wait()
+	return results
+}
+
+// probeModel sends a minimal chat request to verify a model is reachable.
+// Returns (true, status) if the model exists (any non-403 response).
+// Returns (false, status) if upstream returns 403 (model not recognized).
+func (c *ModelCache) probeModel(apiKey, modelID string) (bool, int) {
+	ctx, cancel := context.WithTimeout(context.Background(), modelFetchTimeout)
+	defer cancel()
+
+	// Build a minimal probe request — empty messages, max 1 token.
+	// Upstream will return either:
+	//   - 403 MODEL_NOT_IN_PLAN or "model not recognized" — model doesn't exist
+	//   - 200 with empty content — model exists but request was minimal
+	//   - 400 bad request — model exists, request was malformed
+	probeBody := map[string]any{
+		"config": map[string]any{
+			"workingDir":    ".",
+			"date":          time.Now().Format("2006-01-02"),
+			"environment":   "cli",
+			"structure":     []string{},
+			"isGitRepo":     false,
+			"currentBranch": "",
+			"mainBranch":    "main",
+			"gitStatus":     "",
+			"recentCommits": []string{},
+		},
+		"memory": "",
+		"taste":  "",
+		"skills": "",
+		"params": map[string]any{
+			"model":       modelID,
+			"messages":    []map[string]any{},
+			"tools":       []any{},
+			"system":      "",
+			"max_tokens":  1,
+			"temperature": 0.0,
+			"stream":      false,
+		},
+		"threadId": "probe",
+	}
+	bodyJSON, _ := json.Marshal(probeBody)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamProbeURL, bytes.NewReader(bodyJSON))
+	if err != nil {
+		return false, 0
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("x-command-code-version", version.GetCommandCodeVersion())
+	req.Header.Set("x-cli-environment", "production")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "command-code-proxy/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, 0
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	// 403 means model not recognized — filter out.
+	// Anything else (200, 400, 429, 500) means model exists at this ID.
+	return resp.StatusCode != http.StatusForbidden, resp.StatusCode
 }
 
 // StartBackgroundRefresh launches a goroutine that periodically refreshes
