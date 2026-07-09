@@ -1,0 +1,10 @@
+services:
+  commandcode-proxy:
+    build: .
+    container_name: commandcode-proxy
+    restart: unless-stopped
+    ports:
+      - "100.101.41.42:55990:55990"
+    environment:
+      - API_KEY=${API_KEY:-}
+    command: ["commandcode-proxy", "--host", "0.0.0.0", "--port", "55990"]

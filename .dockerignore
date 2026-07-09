@@ -1,0 +1,11 @@
+.git/
+.gitattributes
+.gitignore
+README.md
+.opencode.json
+.drafts/
+.claude/
+bin/
+.DS_Store
+.code-review-graph/
+commandcode-proxy
